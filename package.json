@@ -1,10 +1,11 @@
 {
   "name": "telegram-media-group-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Telegram webhook server for grouping media",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
