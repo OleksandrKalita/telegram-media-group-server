@@ -16,8 +16,21 @@ const redis = new Redis(process.env.REDIS_URL, {
 redis.on('connect', () => console.log('✅ Redis connected'));
 redis.on('error', (err) => console.error('❌ Redis error:', err.message));
 
+// Функція для витягування інформації про користувача
+function getUserInfo(msg) {
+  return {
+    user_id: msg.from?.id,
+    username: msg.from?.username || null,
+    first_name: msg.from?.first_name || null,
+    last_name: msg.from?.last_name || null,
+    chat_id: msg.chat?.id,
+    chat_type: msg.chat?.type,
+    chat_title: msg.chat?.title || null
+  };
+}
+
 // Функція для обробки завершення групи
-async function processMediaGroup(mediaGroupId) {
+async function processMediaGroup(mediaGroupId, userInfo) {
   try {
     const all = await redis.lrange(mediaGroupId, 0, -1);
     if (all.length === 0) return;
@@ -25,15 +38,18 @@ async function processMediaGroup(mediaGroupId) {
     const media = all.map((m) => JSON.parse(m));
     await redis.del(mediaGroupId);
     await redis.del(`timer:${mediaGroupId}`);
+    await redis.del(`user:${mediaGroupId}`);
     
     console.log(`📦 Sending ${media.length} files for group ${mediaGroupId}`);
     
     await axios.post(process.env.N8N_WEBHOOK_URL, {
       media_group_id: mediaGroupId,
       files: media,
+      user: userInfo,
+      timestamp: new Date().toISOString()
     });
     
-    console.log(`✅ Sent ${media.length} files to n8n`);
+    console.log(`✅ Sent ${media.length} files to n8n for user @${userInfo.username || userInfo.user_id}`);
   } catch (error) {
     console.error("❌ Error in processMediaGroup:", error.message);
   }
@@ -52,18 +68,27 @@ app.post("/telegram", async (req, res) => {
     const fileId = msg.photo?.[msg.photo.length - 1]?.file_id || msg.document?.file_id || msg.video?.file_id;
     const caption = msg.caption || "";
     const messageId = msg.message_id;
+    const userInfo = getUserInfo(msg);
 
     // Якщо це не група — просто пересилаємо в n8n одразу
     if (!mediaGroupId) {
-      console.log(`📤 Sending single file to n8n`);
+      console.log(`📤 Sending single file to n8n from user @${userInfo.username || userInfo.user_id}`);
       await axios.post(process.env.N8N_WEBHOOK_URL, { 
         single: true,
         file_id: fileId,
         caption: caption,
-        message: msg 
+        user: userInfo,
+        message: msg,
+        timestamp: new Date().toISOString()
       });
       console.log(`✅ Sent single file`);
       return res.sendStatus(200);
+    }
+
+    // Зберігаємо інформацію про користувача для групи (тільки один раз)
+    const userExists = await redis.exists(`user:${mediaGroupId}`);
+    if (!userExists) {
+      await redis.set(`user:${mediaGroupId}`, JSON.stringify(userInfo), "EX", 10);
     }
 
     // Зберігаємо елемент у Redis
@@ -77,7 +102,9 @@ app.post("/telegram", async (req, res) => {
     setTimeout(async () => {
       const timerExists = await redis.exists(`timer:${mediaGroupId}`);
       if (!timerExists) {
-        await processMediaGroup(mediaGroupId);
+        const savedUserInfo = await redis.get(`user:${mediaGroupId}`);
+        const userInfoParsed = savedUserInfo ? JSON.parse(savedUserInfo) : userInfo;
+        await processMediaGroup(mediaGroupId, userInfoParsed);
       }
     }, 3000);
 
